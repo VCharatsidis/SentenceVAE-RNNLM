@@ -20,6 +20,8 @@ from collections import Counter
 import torch.utils.data as data
 import numpy as np
 
+import matplotlib as plt
+
 import os
 import io
 import json
@@ -138,7 +140,7 @@ def train(config):
     accuracies = [0, 1]
     losses = [0, 1]
 
-    for epochs in range(15):
+    for epochs in range(2):
         for step, (batch_inputs, batch_targets, lengths) in enumerate(data_loader):
 
             # Only for time measurement of step through network
@@ -159,10 +161,7 @@ def train(config):
 
             out, _ = model.forward(device_inputs)
             outt = out.transpose(0, 1).transpose(1, 2)
-            print("outt")
-            print(outt.shape)
-            print("targets")
-            print(device_targets.shape)
+
             optimizer.zero_grad()
             loss = criterion.forward(outt, device_targets)
             losses.append(loss.item())
@@ -192,11 +191,19 @@ def train(config):
                         text = seq_sampling(model, dataset, length, temp, device)
                         # print(text)
                         file = open("generated.txt", "a")
-                        file.write(text)
+                        file.write(text+"\n")
                         file.write("")
                         file.close()
-                        fp.write("epoch: {} ; Accuracy: {} ; {} ; temp: {} ; {}\n".format(epochs, accuracy, temp,  text))
+                        print("epoch: {} ; Accuracy: {} loss: {} ; temp: {} ; text: {}\n".format(epochs, accuracy, loss.item(), temp,  text))
+                        fp.write("epoch: {} ; Accuracy: {} loss: {} ; temp: {} ; text: {}\n".format(epochs, accuracy, loss.item(), temp,  text))
 
+    plt.plot(accuracies)
+    plt.ylabel('accuracies')
+    plt.show()
+
+    plt.plot(losses)
+    plt.ylabel('losses')
+    plt.show()
     print('Done training.')
 
 ################################################################################
@@ -228,8 +235,8 @@ if __name__ == "__main__":
 
     # Misc params
     parser.add_argument('--summary_path', type=str, default="./summaries/", help='Output path for summaries')
-    parser.add_argument('--print_every', type=int, default=5000, help='How often to print training progress')
-    parser.add_argument('--sample_every', type=int, default=5000, help='How often to sample from the model')
+    parser.add_argument('--print_every', type=int, default=500, help='How often to print training progress')
+    parser.add_argument('--sample_every', type=int, default=500, help='How often to sample from the model')
     parser.add_argument('--device', type=str, default="cuda:0", help="Training device 'cpu' or 'cuda:0'")
 
     config = parser.parse_args()

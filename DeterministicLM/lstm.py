@@ -18,7 +18,7 @@ class TextGenerationModel(nn.Module):
         self.to(device)
 
     def forward(self, x, h_and_c=None):
-        print(x)
+
         embedding = self.embed(x)
         hidden_states, (h, c) = self.lstm(embedding, h_and_c)
         return self.projection(hidden_states), (h, c)

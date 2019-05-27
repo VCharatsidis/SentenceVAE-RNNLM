@@ -14,16 +14,14 @@ from torch.utils.data import DataLoader
 
 class Encoder(nn.Module):
 
-    def __init__(self, embedding_dim, lstm_num_hidden=250, lstm_num_layers=2, hidden_dim=250, z_dim=20, device='cuda:0', dropout_prob=0.):
+    def __init__(self, embedding_dim, lstm_num_hidden=250, lstm_num_layers=2, z_dim=20, device='cuda:0', dropout_prob=0.):
         super().__init__()
         self.to(device)
 
         self.lstm = nn.LSTM(embedding_dim, lstm_num_hidden, lstm_num_layers, dropout=dropout_prob, batch_first=True)
 
-        self.h = nn.Linear(lstm_num_hidden, hidden_dim)
-        self.mean = nn.Linear(hidden_dim, z_dim)
-        self.std = nn.Linear(hidden_dim, z_dim)
-        self.relu = nn.ReLU()
+        self.mean = nn.Linear(lstm_num_hidden * lstm_num_layers, z_dim)
+        self.std = nn.Linear(lstm_num_hidden * lstm_num_layers, z_dim)
         self.softplus = nn.Softplus()
 
     def forward(self, embeded_input, h_and_c=None):
@@ -35,9 +33,6 @@ class Encoder(nn.Module):
 
         hidden_states, (h, c) = self.lstm(embeded_input, h_and_c)
 
-        h = self.h(h)
-        h = self.relu(h)
-
         mean = self.mean(h)
         std = self.std(h)
         std = self.softplus(std)
@@ -47,11 +42,12 @@ class Encoder(nn.Module):
 
 class Decoder(nn.Module):
 
-    def __init__(self, vocabulary_size, lstm_num_hidden=250, lstm_num_layers=3, hidden_dim=250, z_dim=20, device='cuda:0', dropout_prob=0.):
+    def __init__(self, vocabulary_size, lstm_num_hidden=250, lstm_num_layers=3, z_dim=20, dropout_prob=0.):
         super().__init__()
 
-        self.latent2hidden = nn.Linear(z_dim, lstm_num_hidden)
-        self.lstm = nn.LSTM(z_dim, lstm_num_hidden, num_layers=lstm_num_layers, dropout=dropout_prob, batch_first=True)
+        embedding_dim = 200
+        self.latent2hidden = nn.Linear(z_dim, lstm_num_hidden * lstm_num_layers)
+        self.lstm = nn.LSTM(embedding_dim, lstm_num_hidden, num_layers=lstm_num_layers, dropout=dropout_prob, batch_first=True)
         self.projection = nn.Linear(lstm_num_hidden, vocabulary_size)
 
     def forward(self, packed_input, z):
@@ -59,7 +55,10 @@ class Decoder(nn.Module):
         Perform forward pass of decoder.
         Returns mean with shape [batch_size, 784].
         """
+
         hidden = self.latent2hidden(z)
+        print(hidden.shape)
+        hidden = hidden.unsqueeze(0)
         hidden_states, (h, c) = self.lstm(packed_input, hidden)
 
         return hidden_states, (h, c)
@@ -73,15 +72,14 @@ class VAE(nn.Module):
 
         lstm_num_hidden = 250
         lstm_num_layers = 2
-        hidden_dim = 250
         device = 'cuda:0'
         dropout_prob = 0.
 
         embedding_dim = 200
         self.embed = nn.Embedding(vocabulary_size, embedding_dim=embedding_dim)
         self.z_dim = z_dim
-        self.encoder = Encoder(embedding_dim, lstm_num_hidden, lstm_num_layers, hidden_dim, z_dim, device, dropout_prob)
-        self.decoder = Decoder(vocabulary_size, lstm_num_hidden, lstm_num_layers, hidden_dim, z_dim, device, dropout_prob)
+        self.encoder = Encoder(embedding_dim, lstm_num_hidden, lstm_num_layers, z_dim, device, dropout_prob)
+        self.decoder = Decoder(vocabulary_size, lstm_num_hidden, lstm_num_layers, z_dim, dropout_prob)
 
     def forward(self, input, lengths):
         """
@@ -90,7 +88,7 @@ class VAE(nn.Module):
         """
 
         sorted_lengths, sorted_idx = torch.sort(lengths, descending=True)
-
+        print(sorted_lengths.data)
         input = input.transpose(0, 1)
 
         input = input[sorted_idx]
@@ -102,12 +100,12 @@ class VAE(nn.Module):
 
         print(packed_input)
 
-        mean, std = self.encoder(packed_input)
+        mean, std = self.encoder(embedding)
 
         e = torch.zeros(mean.shape).normal_()
         z = std * e + mean
 
-        y, _ = self.decoder(z)
+        y, _ = self.decoder(embedding, z)
 
         criterion = nn.CrossEntropyLoss()
         y = y.transpose(0, 1).transpose(1, 2)
