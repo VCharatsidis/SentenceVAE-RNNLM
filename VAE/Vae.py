@@ -18,7 +18,7 @@ class Encoder(nn.Module):
         super().__init__()
         self.to(device)
 
-        self.lstm = nn.LSTM(embedding_dim, lstm_num_hidden, lstm_num_layers, dropout=dropout_prob)
+        self.lstm = nn.LSTM(embedding_dim, lstm_num_hidden, lstm_num_layers, dropout=dropout_prob, batch_first=True)
 
         self.h = nn.Linear(lstm_num_hidden, hidden_dim)
         self.mean = nn.Linear(hidden_dim, z_dim)
@@ -51,7 +51,7 @@ class Decoder(nn.Module):
         super().__init__()
 
         self.latent2hidden = nn.Linear(z_dim, lstm_num_hidden)
-        self.lstm = nn.LSTM(z_dim, lstm_num_hidden, num_layers=lstm_num_layers, dropout=dropout_prob)
+        self.lstm = nn.LSTM(z_dim, lstm_num_hidden, num_layers=lstm_num_layers, dropout=dropout_prob, batch_first=True)
         self.projection = nn.Linear(lstm_num_hidden, vocabulary_size)
 
     def forward(self, packed_input, z):
@@ -83,16 +83,25 @@ class VAE(nn.Module):
         self.encoder = Encoder(embedding_dim, lstm_num_hidden, lstm_num_layers, hidden_dim, z_dim, device, dropout_prob)
         self.decoder = Decoder(vocabulary_size, lstm_num_hidden, lstm_num_layers, hidden_dim, z_dim, device, dropout_prob)
 
-    def forward(self, input):
+    def forward(self, input, lengths):
         """
         Given input, perform an encoding and decoding step and return the
         negative average elbo for the given batch.
         """
-        print(input.shape)
-        sorted_lengths, sorted_idx = torch.sort(3, descending=True)
+
+        sorted_lengths, sorted_idx = torch.sort(lengths, descending=True)
+
+        input = input.transpose(0, 1)
+
+        input = input[sorted_idx]
+
         embedding = self.embed(input)
+
         packed_input = torch.nn.utils.rnn.pack_padded_sequence(embedding, sorted_lengths.data.tolist(),
                                                                batch_first=True)
+
+        print(packed_input)
+
         mean, std = self.encoder(packed_input)
 
         e = torch.zeros(mean.shape).normal_()
@@ -161,7 +170,7 @@ def epoch_iter(model, data, optimizer, device):
     batch_size = 64
     data_loader = DataLoader(data, batch_size, num_workers=1)
 
-    for step, (batch_inputs, batch_targets) in enumerate(data_loader):
+    for step, (batch_inputs, batch_targets, lengths) in enumerate(data_loader):
 
         if not batch_inputs:
             continue
@@ -170,7 +179,7 @@ def epoch_iter(model, data, optimizer, device):
 
         device_inputs = tensor_sample.reshape(tensor_sample.shape[0], -1)
 
-        elbo = model.forward(device_inputs)
+        elbo = model.forward(device_inputs, lengths)
         average_epoch_elbo -= elbo
 
         if model.training:
