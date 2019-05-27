@@ -14,11 +14,10 @@ from torch.utils.data import DataLoader
 
 class Encoder(nn.Module):
 
-    def __init__(self, vocabulary_size, lstm_num_hidden=250, lstm_num_layers=2, hidden_dim=250, z_dim=20, device='cuda:0', dropout_prob=0.):
+    def __init__(self, embedding_dim, lstm_num_hidden=250, lstm_num_layers=2, hidden_dim=250, z_dim=20, device='cuda:0', dropout_prob=0.):
         super().__init__()
         self.to(device)
-        embedding_dim = 200
-        self.embed = nn.Embedding(vocabulary_size, embedding_dim=embedding_dim)
+
         self.lstm = nn.LSTM(embedding_dim, lstm_num_hidden, lstm_num_layers, dropout=dropout_prob)
 
         self.h = nn.Linear(lstm_num_hidden, hidden_dim)
@@ -27,14 +26,16 @@ class Encoder(nn.Module):
         self.relu = nn.ReLU()
         self.softplus = nn.Softplus()
 
-    def forward(self, input):
+    def forward(self, embeded_input, h_and_c=None):
         """
         Perform forward pass of encoder.
         Returns mean and std with shape [batch_size, z_dim]. Make sure
         that any constraints are enforced.
         """
-        lstm = self.lstm(input)
-        h = self.h(lstm)
+
+        hidden_states, (h, c) = self.lstm(embeded_input, h_and_c)
+
+        h = self.h(h)
         h = self.relu(h)
 
         mean = self.mean(h)
@@ -48,46 +49,73 @@ class Decoder(nn.Module):
 
     def __init__(self, vocabulary_size, lstm_num_hidden=250, lstm_num_layers=3, hidden_dim=250, z_dim=20, device='cuda:0', dropout_prob=0.):
         super().__init__()
-        embedding_dim = 200
-        self.embed = nn.Embedding(vocabulary_size, embedding_dim=embedding_dim)
-        self.lstm = nn.LSTM(z_dim, embedding_dim, lstm_num_layers, dropout=dropout_prob)
 
+        self.latent2hidden = nn.Linear(z_dim, lstm_num_hidden)
+        self.lstm = nn.LSTM(z_dim, lstm_num_hidden, num_layers=lstm_num_layers, dropout=dropout_prob)
+        self.projection = nn.Linear(lstm_num_hidden, vocabulary_size)
 
-
-    def forward(self, z):
+    def forward(self, packed_input, z):
         """
         Perform forward pass of decoder.
         Returns mean with shape [batch_size, 784].
         """
-        out = self.lstm(z)
-        return out
+        hidden = self.latent2hidden(z)
+        hidden_states, (h, c) = self.lstm(packed_input, hidden)
+
+        return hidden_states, (h, c)
+
 
 
 class VAE(nn.Module):
 
-    def __init__(self, hidden_dim=500, z_dim=20):
+    def __init__(self, vocabulary_size,  z_dim=20):
         super().__init__()
 
+        lstm_num_hidden = 250
+        lstm_num_layers = 2
+        hidden_dim = 250
+        device = 'cuda:0'
+        dropout_prob = 0.
+
+        embedding_dim = 200
+        self.embed = nn.Embedding(vocabulary_size, embedding_dim=embedding_dim)
         self.z_dim = z_dim
-        self.encoder = Encoder(hidden_dim, z_dim)
-        self.decoder = Decoder(hidden_dim, z_dim)
+        self.encoder = Encoder(embedding_dim, lstm_num_hidden, lstm_num_layers, hidden_dim, z_dim, device, dropout_prob)
+        self.decoder = Decoder(vocabulary_size, lstm_num_hidden, lstm_num_layers, hidden_dim, z_dim, device, dropout_prob)
 
     def forward(self, input):
         """
         Given input, perform an encoding and decoding step and return the
         negative average elbo for the given batch.
         """
-        mean, std = self.encoder(input)
+        print(input.shape)
+        sorted_lengths, sorted_idx = torch.sort(3, descending=True)
+        embedding = self.embed(input)
+        packed_input = torch.nn.utils.rnn.pack_padded_sequence(embedding, sorted_lengths.data.tolist(),
+                                                               batch_first=True)
+        mean, std = self.encoder(packed_input)
 
         e = torch.zeros(mean.shape).normal_()
         z = std * e + mean
 
-        y = self.decoder(z)
+        y, _ = self.decoder(z)
 
+        criterion = nn.CrossEntropyLoss()
+        y = y.transpose(0, 1).transpose(1, 2)
+
+        print(y.shape)
+        print(input.shape)
+
+        input = input.transpose(0, 1)
+
+        print(input.shape)
+
+        L_reconstruction = criterion.forward(y, input)
         eps = 1e-8
-        L_reconstruction = input * y.log() + (1 - input) * (1 - y).log()
+
         KLD = 0.5 * (std.pow(2) + mean.pow(2) - 1 - torch.log(std.pow(2)+eps))
-        elbo = KLD.sum(dim=-1) - L_reconstruction.sum(dim=-1)
+        elbo = KLD.sum(dim=-1) - L_reconstruction
+
         average_negative_elbo = elbo.mean()
 
         return average_negative_elbo
@@ -127,15 +155,20 @@ def epoch_iter(model, data, optimizer, device):
     use model.training to determine if in 'training mode' or not.
     Returns the average elbo for the complete epoch.
     """
+
     average_epoch_elbo = 0
     size = len(data)
-    data_loader = DataLoader(data, 64, num_workers=1)
+    batch_size = 64
+    data_loader = DataLoader(data, batch_size, num_workers=1)
 
-    for sample in data_loader:
+    for step, (batch_inputs, batch_targets) in enumerate(data_loader):
 
-        tensor_sample = torch.stack(sample, dim=0).to(device)
+        if not batch_inputs:
+            continue
 
-        device_inputs = sample.reshape(tensor_sample.shape[0], -1)
+        tensor_sample = torch.stack(batch_inputs, dim=0).to(device)
+
+        device_inputs = tensor_sample.reshape(tensor_sample.shape[0], -1)
 
         elbo = model.forward(device_inputs)
         average_epoch_elbo -= elbo
@@ -182,7 +215,8 @@ def save_sample(sample, size, epoch, nrow=8):
 def main():
     device = torch.device('cpu')
     train, val, test = retrieve_data()
-    model = VAE(z_dim=ARGS.zdim)
+
+    model = VAE(train.vocab_size, z_dim=ARGS.zdim)
     optimizer = torch.optim.Adam(model.parameters())
     size_width = 28
 

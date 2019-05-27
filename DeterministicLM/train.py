@@ -144,6 +144,10 @@ def train(config):
 
             out, _ = model.forward(device_inputs)
             outt = out.transpose(0, 1).transpose(1, 2)
+            print("outt")
+            print(outt.shape)
+            print("targets")
+            print(device_targets.shape)
             optimizer.zero_grad()
             loss = criterion.forward(outt, device_targets)
             losses.append(loss.item())
