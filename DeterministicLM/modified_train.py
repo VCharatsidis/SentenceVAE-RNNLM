@@ -26,9 +26,10 @@ import os
 import io
 import json
 
+
 ################################################################################
 class TextData(data.Dataset):
-    def __init__(self, sentences, word2idx, idx2word, vocab_size):
+    def __init__(self, sentences, word2idx, idx2word, vocab_size, rare_words):
         self.sentences = sentences
         self.word2idx = word2idx
         self._vocab_size = vocab_size
@@ -36,11 +37,16 @@ class TextData(data.Dataset):
         self.idx2word = idx2word
         self.max_sequence_length = 30
         self.padding_idx = 0
+        self.rare_words = rare_words
 
     def __getitem__(self, item):
         offset = np.random.randint(0, len(self.sentences))
         sentence = self.sentences[offset]
         sentence_length = len(sentence)
+        for j, word in enumerate(sentence):
+            if word in self.rare_words:
+                sentence[j] = 'RARE'
+
         if sentence_length > self.max_sequence_length:
             sentence_length = self.max_sequence_length
 
@@ -48,11 +54,11 @@ class TextData(data.Dataset):
             inputs = [self.word2idx[sentence[i]] for i in range(0, self.max_sequence_length - 1)]
             targets = [self.word2idx[sentence[i]] for i in range(1, self.max_sequence_length)]
         else:
-            inputs = [self.word2idx[sentence[i]] for i in range(0, sentence_length-1)]
+            inputs = [self.word2idx[sentence[i]] for i in range(0, sentence_length - 1)]
             targets = [self.word2idx[sentence[i]] for i in range(1, sentence_length)]
 
-            inputs.extend([self.padding_idx * (self.max_sequence_length - sentence_length)])
-            targets.extend([self.padding_idx * (self.max_sequence_length - sentence_length)])
+            inputs.extend([self.padding_idx for i in range(self.max_sequence_length - sentence_length)])
+            targets.extend([self.padding_idx for i in range(self.max_sequence_length - sentence_length)])
 
         return inputs, targets, sentence_length
 
@@ -67,7 +73,8 @@ class TextData(data.Dataset):
         return self._vocab_size
 
 
-def retrieve_data(folder="C:\\Users\\chara\\PycharmProjects\\SentenceVAE\\DeterministicLM\\data", train_filename="02-21.10way.clean", val_filename="22.auto.clean", test_filename="23.auto.clean"):
+def retrieve_data(folder="C:\\Users\\chara\\PycharmProjects\\SentenceVAE\\DeterministicLM\\data",
+                  train_filename="02-21.10way.clean", val_filename="22.auto.clean", test_filename="23.auto.clean"):
     train_data = BracketParseCorpusReader(folder, train_filename)
     val_data = BracketParseCorpusReader(folder, val_filename)
     test_data = BracketParseCorpusReader(folder, test_filename)
@@ -80,7 +87,7 @@ def retrieve_data(folder="C:\\Users\\chara\\PycharmProjects\\SentenceVAE\\Determ
 
     word_counter = Counter(all_words)
 
-    vocab = ['PAD', 'SOS', 'EOS'] + list(word_counter.keys())
+    vocab = ['PAD', 'SOS', 'EOS', 'RARE'] + list(word_counter.keys())
     vocab_size = len(vocab)
 
     word2idx = {ch: i for i, ch in enumerate(vocab)}
@@ -90,9 +97,11 @@ def retrieve_data(folder="C:\\Users\\chara\\PycharmProjects\\SentenceVAE\\Determ
     val_sents = [[w.lower() for w in sent] for sent in val_data.sents()]
     test_sents = [[w.lower() for w in sent] for sent in test_data.sents()]
 
-    train_dataset = TextData(train_sents, word2idx, idx2word, vocab_size)
-    val_dataset = TextData(val_sents, word2idx, idx2word, vocab_size)
-    test_dataset = TextData(test_sents, word2idx, idx2word, vocab_size)
+    rare_words = [word for word in list(word_counter.keys()) if word_counter[word] < 2]
+
+    train_dataset = TextData(train_sents, word2idx, idx2word, vocab_size, rare_words)
+    val_dataset = TextData(val_sents, word2idx, idx2word, vocab_size, rare_words)
+    test_dataset = TextData(test_sents, word2idx, idx2word, vocab_size, rare_words)
 
     return train_dataset, val_dataset, test_dataset
 
@@ -101,7 +110,7 @@ def seq_sampling(model, dataset, seq_length, temp=None, device='cpu'):
     # Only start with a lowercase character:
     dataset.vocab_size
     pivot = torch.Tensor([[random.randint(0, dataset.vocab_size)]]).long().to(device)
-    #pivot = torch.randint(dataset.vocab_size, (1, 1), device=device)
+    # pivot = torch.randint(dataset.vocab_size, (1, 1), device=device)
     ramblings = [pivot[0, 0].item()]
 
     h_and_c = None
@@ -110,12 +119,15 @@ def seq_sampling(model, dataset, seq_length, temp=None, device='cpu'):
         if temp is None or temp == 0:
             pivot[0, 0] = out.squeeze().argmax()
         else:
-            dist = torch.softmax(out.squeeze()/temp, dim=0)
+            dist = torch.softmax(out.squeeze() / temp, dim=0)
             pivot[0, 0] = torch.multinomial(dist, 1)
         ramblings.append(pivot[0, 0].item())
     return dataset.convert_to_string(ramblings)
 
-counter= 0
+
+counter = 0
+
+
 def train(config):
     # Initialize the device which to run the model on
     device = torch.device(config.device)
@@ -125,7 +137,6 @@ def train(config):
 
     torch.save(dataset, config.txt_file + '.dataset')
 
-    #dataset = TextDataset(config.txt_file, config.seq_length)
 
     model = TextGenerationModel(dataset.vocab_size, config.lstm_num_hidden, config.lstm_num_layers, config.device,
                                 1. - config.dropout_keep_prob)
@@ -134,13 +145,16 @@ def train(config):
 
     # Setup the loss and optimizer
     criterion = nn.CrossEntropyLoss()
+    nll_criterion = torch.nn.NLLLoss()
     optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
     lr_scheduler = optim.lr_scheduler.StepLR(
         optimizer, step_size=config.learning_rate_step, gamma=config.learning_rate_decay)
     accuracies = [0, 1]
     losses = [0, 1]
+    nll_losses = [0, 1]
 
-    for epochs in range(1):
+    for epochs in range(25):
+        nll = 0
         for step, (batch_inputs, batch_targets, lengths) in enumerate(data_loader):
 
             # Only for time measurement of step through network
@@ -165,6 +179,9 @@ def train(config):
             optimizer.zero_grad()
             loss = criterion.forward(outt, device_targets)
             losses.append(loss.item())
+            nll_loss = nll_criterion.forward(outt, device_targets)
+            nll += nll_loss.sum()
+            nll_losses.append(nll_loss.sum())
             accuracy = (outt.argmax(dim=1) == device_targets).float().mean()
             accuracies.append(accuracy)
 
@@ -174,14 +191,14 @@ def train(config):
 
             # Just for time measurement
             t2 = time.time()
-            examples_per_second = config.batch_size/float(t2-t1)
+            examples_per_second = config.batch_size / float(t2 - t1)
 
             if step % config.print_every == 0:
                 print("[{}] Train Step {:04d}/{:04d}, Batch Size = {}, Examples/Sec = {:.2f}, "
                       "Accuracy = {:.2f}, Loss = {:.3f}, LR = {}".format(
-                        datetime.now().strftime("%Y-%m-%d %H:%M"), step,
-                        int(config.train_steps), config.batch_size, examples_per_second,
-                        accuracies[-1], losses[-1], optimizer.param_groups[-1]['lr']
+                    datetime.now().strftime("%Y-%m-%d %H:%M"), step,
+                    int(config.train_steps), config.batch_size, examples_per_second,
+                    accuracies[-1], losses[-1], optimizer.param_groups[-1]['lr']
                 ))
 
             if step % config.sample_every == 0:
@@ -191,11 +208,60 @@ def train(config):
                         text = seq_sampling(model, dataset, length, temp, device)
                         # print(text)
                         file = open("generated.txt", "a")
-                        file.write(text+"\n")
+                        file.write(text + "\n")
                         file.write("")
                         file.close()
-                        print("epoch: {} ; Accuracy: {} loss: {} ; temp: {} ; text: {}\n".format(epochs, accuracy, loss.item(), temp,  text))
-                        fp.write("epoch: {} ; Accuracy: {} loss: {} ; temp: {} ; text: {}\n".format(epochs, accuracy, loss.item(), temp,  text))
+                        print("epoch: {} ; Accuracy: {} loss: {} ; temp: {} ; text: {}\n".format(epochs, accuracy,
+                                                                                                 loss.item(), temp,
+                                                                                                 text))
+                        fp.write("epoch: {} ; Accuracy: {} loss: {} ; temp: {} ; text: {}\n".format(epochs, accuracy,
+                                                                                                    loss.item(), temp,
+                                                                                                    text))
+
+        total_length = sum([len(sent) + 1 for sent in dataset.sentences])
+        ppl = np.exp(nll / total_length)
+
+        print('Train perplexity: {}'.format(ppl))
+        val_accuracies = [0, 1]
+        val_losses = [0, 1]
+        val_nll_losses = [0, 1]
+
+        # validation
+        val_data_loader = DataLoader(val, config.batch_size, num_workers=1)
+        for step, (val_batch_inputs, val_batch_targets) in enumerate(val_data_loader):
+
+            # Only for time measurement of step through network
+            # t1 = time.time()
+
+            if not batch_inputs:
+                continue
+            val_device_inputs = torch.stack(val_batch_inputs, dim=0).to(device)
+            val_device_targets = torch.stack(val_batch_targets, dim=1).to(device)
+
+            out, _ = model.forward(val_device_inputs)
+            outt = out.transpose(0, 1).transpose(1, 2)
+            # optimizer.zero_grad()
+            val_loss = criterion.forward(outt, val_device_targets)
+            val_losses.append(val_loss.item())
+            val_nll_loss = nll_criterion.forward(outt, val_device_targets)
+            val_nll_losses += val_nll_loss.sum()
+            val_nll_losses.append(val_nll_loss.sum())
+
+            val_accuracy = (outt.argmax(dim=1) == val_device_targets).float().mean()
+            val_accuracies.append(val_accuracy)
+
+            if step % config.print_every == 0:
+                print("[{}] Train Step {:04d}/{:04d}, Batch Size = {}, Examples/Sec = {:.2f}, "
+                      "Accuracy = {:.2f}, Loss = {:.3f}, NLL = {}, LR = {}".format(
+                    datetime.now().strftime("%Y-%m-%d %H:%M"), step,
+                    int(config.train_steps), config.batch_size, examples_per_second,
+                    accuracies[-1], losses[-1], nll_losses[-1], optimizer.param_groups[-1]['lr']
+                ))
+
+        total_val_length = sum([len(sent) + 1 for sent in val.sentences])
+        #val_ppl = np.exp(val_nll / total_val_length)
+
+    print('Done training. Train perplexity: {}'.format(ppl))
 
     plt.plot(accuracies)
     plt.ylabel('accuracies')
@@ -204,19 +270,28 @@ def train(config):
     plt.plot(losses)
     plt.ylabel('losses')
     plt.show()
+
+    plt.plot(nll_losses)
+    plt.ylabel('nll_losses')
+    plt.show()
     print('Done training.')
+
+    return accuracies, losses, nll_losses, val_accuracies, val_losses, val_nll_losses
+
+
+
 
 ################################################################################
 ################################################################################
 
 
 if __name__ == "__main__":
-
     # Parse training configuration
     parser = argparse.ArgumentParser()
 
     # Model params
-    parser.add_argument('--txt_file', type=str, required=False, default='southpark.txt', help="Path to a .txt file to train on")
+    parser.add_argument('--txt_file', type=str, required=False, default='southpark.txt',
+                        help="Path to a .txt file to train on")
     parser.add_argument('--seq_length', type=int, default=15, help='Length of an input sequence')
     parser.add_argument('--lstm_num_hidden', type=int, default=128, help='Number of hidden units in the LSTM')
     parser.add_argument('--lstm_num_layers', type=int, default=3, help='Number of LSTM layers in the model')

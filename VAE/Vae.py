@@ -30,7 +30,7 @@ class Encoder(nn.Module):
         Returns mean and std with shape [batch_size, z_dim]. Make sure
         that any constraints are enforced.
         """
-
+        print(embeded_input)
         hidden_states, (h, c) = self.lstm(embeded_input, h_and_c)
 
         mean = self.mean(h)
@@ -45,20 +45,22 @@ class Decoder(nn.Module):
     def __init__(self, vocabulary_size, lstm_num_hidden=250, lstm_num_layers=3, z_dim=20, dropout_prob=0.):
         super().__init__()
 
+        self.lstm_num_layers = 3
         embedding_dim = 200
         self.latent2hidden = nn.Linear(z_dim, lstm_num_hidden * lstm_num_layers)
         self.lstm = nn.LSTM(embedding_dim, lstm_num_hidden, num_layers=lstm_num_layers, dropout=dropout_prob, batch_first=True)
         self.projection = nn.Linear(lstm_num_hidden, vocabulary_size)
 
-    def forward(self, packed_input, z):
+    def forward(self, packed_input, z, batch_size=16):
         """
         Perform forward pass of decoder.
         Returns mean with shape [batch_size, 784].
         """
 
         hidden = self.latent2hidden(z)
+        print("hidden")
         print(hidden.shape)
-        hidden = hidden.unsqueeze(0)
+        hidden = hidden.view(self.lstm_num_layers, batch_size, self.hidden_size)
         hidden_states, (h, c) = self.lstm(packed_input, hidden)
 
         return hidden_states, (h, c)
@@ -86,13 +88,14 @@ class VAE(nn.Module):
         Given input, perform an encoding and decoding step and return the
         negative average elbo for the given batch.
         """
-
+        print(input.shape)
+        print(input[0].shape)
         sorted_lengths, sorted_idx = torch.sort(lengths, descending=True)
         print(sorted_lengths.data)
         input = input.transpose(0, 1)
 
         input = input[sorted_idx]
-
+        print(input.shape)
         embedding = self.embed(input)
 
         packed_input = torch.nn.utils.rnn.pack_padded_sequence(embedding, sorted_lengths.data.tolist(),
@@ -100,12 +103,14 @@ class VAE(nn.Module):
 
         print(packed_input)
 
-        mean, std = self.encoder(embedding)
+        mean, std = self.encoder(packed_input)
 
         e = torch.zeros(mean.shape).normal_()
         z = std * e + mean
 
-        y, _ = self.decoder(embedding, z)
+        packed_input = torch.nn.utils.rnn.pack_padded_sequence(embedding, sorted_lengths.data.tolist(),
+                                                               batch_first=True)
+        y, _ = self.decoder(packed_input, z)
 
         criterion = nn.CrossEntropyLoss()
         y = y.transpose(0, 1).transpose(1, 2)
@@ -165,19 +170,17 @@ def epoch_iter(model, data, optimizer, device):
 
     average_epoch_elbo = 0
     size = len(data)
-    batch_size = 64
+    batch_size = 16
     data_loader = DataLoader(data, batch_size, num_workers=1)
 
     for step, (batch_inputs, batch_targets, lengths) in enumerate(data_loader):
 
-        if not batch_inputs:
-            continue
+        # if not batch_inputs:
+        #     continue
 
         tensor_sample = torch.stack(batch_inputs, dim=0).to(device)
 
-        device_inputs = tensor_sample.reshape(tensor_sample.shape[0], -1)
-
-        elbo = model.forward(device_inputs, lengths)
+        elbo = model.forward(tensor_sample, lengths)
         average_epoch_elbo -= elbo
 
         if model.training:
