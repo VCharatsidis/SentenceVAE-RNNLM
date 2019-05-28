@@ -17,22 +17,25 @@ class Encoder(nn.Module):
     def __init__(self, embedding_dim, lstm_num_hidden=250, lstm_num_layers=2, z_dim=20, device='cuda:0', dropout_prob=0.):
         super().__init__()
         self.to(device)
-
+        self.lstm_num_hidden = lstm_num_hidden
         self.lstm = nn.LSTM(embedding_dim, lstm_num_hidden, lstm_num_layers, dropout=dropout_prob, batch_first=True)
 
-        self.mean = nn.Linear(lstm_num_hidden * lstm_num_layers, z_dim)
-        self.std = nn.Linear(lstm_num_hidden * lstm_num_layers, z_dim)
+        self.projection = nn.Linear(lstm_num_hidden, lstm_num_layers * z_dim)
+        self.mean = nn.Linear(lstm_num_layers * z_dim, z_dim)
+        self.std = nn.Linear(lstm_num_layers * z_dim, z_dim)
         self.softplus = nn.Softplus()
 
-    def forward(self, embeded_input, h_and_c=None):
+    def forward(self, embeded_input, batch_size):
         """
         Perform forward pass of encoder.
         Returns mean and std with shape [batch_size, z_dim]. Make sure
         that any constraints are enforced.
         """
-        print(embeded_input)
-        hidden_states, (h, c) = self.lstm(embeded_input, h_and_c)
 
+        outs, hidden = self.lstm(embeded_input)
+
+        h = hidden.view(batch_size, self.hidden_size)
+        h = self.projection(h)
         mean = self.mean(h)
         std = self.std(h)
         std = self.softplus(std)
@@ -42,24 +45,25 @@ class Encoder(nn.Module):
 
 class Decoder(nn.Module):
 
-    def __init__(self, vocabulary_size, lstm_num_hidden=250, lstm_num_layers=3, z_dim=20, dropout_prob=0.):
+    def __init__(self, vocabulary_size, input_size, lstm_num_hidden=250, lstm_num_layers=1, z_dim=20, dropout_prob=0.):
         super().__init__()
 
         self.lstm_num_layers = 3
-        embedding_dim = 200
-        self.latent2hidden = nn.Linear(z_dim, lstm_num_hidden * lstm_num_layers)
-        self.lstm = nn.LSTM(embedding_dim, lstm_num_hidden, num_layers=lstm_num_layers, dropout=dropout_prob, batch_first=True)
+        self.latent2hidden = nn.Linear(z_dim, lstm_num_hidden)
+        self.tanh = nn.Tanh()
+
+        self.lstm = nn.LSTM(input_size, lstm_num_hidden, num_layers=lstm_num_layers, dropout=dropout_prob, batch_first=True)
         self.projection = nn.Linear(lstm_num_hidden, vocabulary_size)
 
-    def forward(self, packed_input, z, batch_size=16):
+
+    def forward(self, z, embeddings):
         """
         Perform forward pass of decoder.
         Returns mean with shape [batch_size, 784].
         """
 
         hidden = self.latent2hidden(z)
-        print("hidden")
-        print(hidden.shape)
+        hdden = self.tanh(hidden)
         hidden = hidden.view(self.lstm_num_layers, batch_size, self.hidden_size)
         hidden_states, (h, c) = self.lstm(packed_input, hidden)
 
@@ -69,7 +73,7 @@ class Decoder(nn.Module):
 
 class VAE(nn.Module):
 
-    def __init__(self, vocabulary_size,  z_dim=20):
+    def __init__(self, vocabulary_size, input_size, lstm_num_hidden, z_dim=20):
         super().__init__()
 
         lstm_num_hidden = 250
@@ -78,7 +82,7 @@ class VAE(nn.Module):
         dropout_prob = 0.
 
         embedding_dim = 200
-        self.embed = nn.Embedding(vocabulary_size, embedding_dim=embedding_dim)
+        self.embed = nn.Embedding(vocabulary_size, input_size, padding_idx=0)
         self.z_dim = z_dim
         self.encoder = Encoder(embedding_dim, lstm_num_hidden, lstm_num_layers, z_dim, device, dropout_prob)
         self.decoder = Decoder(vocabulary_size, lstm_num_hidden, lstm_num_layers, z_dim, dropout_prob)
@@ -88,29 +92,21 @@ class VAE(nn.Module):
         Given input, perform an encoding and decoding step and return the
         negative average elbo for the given batch.
         """
-        print(input.shape)
-        print(input[0].shape)
-        sorted_lengths, sorted_idx = torch.sort(lengths, descending=True)
-        print(sorted_lengths.data)
-        input = input.transpose(0, 1)
+        batch_size = input.size(0)
+        embeddings = self.embed(input)
 
-        input = input[sorted_idx]
-        print(input.shape)
-        embedding = self.embed(input)
-
-        packed_input = torch.nn.utils.rnn.pack_padded_sequence(embedding, sorted_lengths.data.tolist(),
-                                                               batch_first=True)
-
-        print(packed_input)
-
-        mean, std = self.encoder(packed_input)
+        mean, std = self.encoder(embeddings)
 
         e = torch.zeros(mean.shape).normal_()
         z = std * e + mean
 
-        packed_input = torch.nn.utils.rnn.pack_padded_sequence(embedding, sorted_lengths.data.tolist(),
-                                                               batch_first=True)
-        y, _ = self.decoder(packed_input, z)
+        prob = torch.rand(input.size())
+        prob[(input.data - self.vocab.SOS_INDEX) * (input.data - self.vocab.PAD_INDEX) == 0] = 1
+        decoder_input_sequence = input.clone()
+        decoder_input_sequence[prob < 0.75] = self.vocab.UNK_INDEX
+        embeddings = self.embed(decoder_input_sequence)
+
+        y, _ = self.decoder(z, embeddings)
 
         criterion = nn.CrossEntropyLoss()
         y = y.transpose(0, 1).transpose(1, 2)

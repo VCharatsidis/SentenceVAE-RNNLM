@@ -28,7 +28,7 @@ import json
 
 ################################################################################
 class TextData(data.Dataset):
-    def __init__(self, sentences, word2idx, idx2word, vocab_size):
+    def __init__(self, sentences, word2idx, idx2word, vocab_size, rare_words):
         self.sentences = sentences
         self.word2idx = word2idx
         self._vocab_size = vocab_size
@@ -36,11 +36,17 @@ class TextData(data.Dataset):
         self.idx2word = idx2word
         self.max_sequence_length = 30
         self.padding_idx = 0
+        self.rare_words = rare_words
 
     def __getitem__(self, item):
         offset = np.random.randint(0, len(self.sentences))
         sentence = self.sentences[offset]
         sentence_length = len(sentence)
+
+        for j, word in enumerate(sentence):
+            if word in self.rare_words:
+                sentence[j] = 'RARE'
+                
         if sentence_length > self.max_sequence_length:
             sentence_length = self.max_sequence_length
 
@@ -80,7 +86,7 @@ def retrieve_data(folder="C:\\Users\\chara\\PycharmProjects\\SentenceVAE\\Determ
 
     word_counter = Counter(all_words)
 
-    vocab = ['PAD', 'SOS', 'EOS'] + list(word_counter.keys())
+    vocab = ['PAD', 'SOS', 'EOS', 'RARE'] + list(word_counter.keys())
     vocab_size = len(vocab)
 
     word2idx = {ch: i for i, ch in enumerate(vocab)}
@@ -89,10 +95,12 @@ def retrieve_data(folder="C:\\Users\\chara\\PycharmProjects\\SentenceVAE\\Determ
     train_sents = [[w.lower() for w in sent] for sent in train_data.sents()]
     val_sents = [[w.lower() for w in sent] for sent in val_data.sents()]
     test_sents = [[w.lower() for w in sent] for sent in test_data.sents()]
+    
+    rare_words = [word for word in list(word_counter.keys()) if word_counter[word] < 2]
 
-    train_dataset = TextData(train_sents, word2idx, idx2word, vocab_size)
-    val_dataset = TextData(val_sents, word2idx, idx2word, vocab_size)
-    test_dataset = TextData(test_sents, word2idx, idx2word, vocab_size)
+    train_dataset = TextData(train_sents, word2idx, idx2word, vocab_size, rare_words)
+    val_dataset = TextData(val_sents, word2idx, idx2word, vocab_size, rare_words)
+    test_dataset = TextData(test_sents, word2idx, idx2word, vocab_size, rare_words)
 
     return train_dataset, val_dataset, test_dataset
 
@@ -134,13 +142,17 @@ def train(config):
 
     # Setup the loss and optimizer
     criterion = nn.CrossEntropyLoss()
+    #to_log_softmax = nn.LogSoftmax(dim=-1)
+    nll_criterion = nn.CrossEntropyLoss(ignore_index=0, reduction="sum")
     optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
     lr_scheduler = optim.lr_scheduler.StepLR(
         optimizer, step_size=config.learning_rate_step, gamma=config.learning_rate_decay)
     accuracies = [0, 1]
     losses = [0, 1]
+    nll_losses = [0, 1]
 
-    for epochs in range(2):
+    for epochs in range(1):
+        nll = 0
         for step, (batch_inputs, batch_targets, lengths) in enumerate(data_loader):
 
             # Only for time measurement of step through network
@@ -153,8 +165,8 @@ def train(config):
             # print(len(batch_targets))
             # print(batch_targets)
 
-            # if not batch_inputs:
-            #     continue
+            if not batch_inputs:
+                continue
 
             device_inputs = torch.stack(batch_inputs, dim=0).to(device)
             device_targets = torch.stack(batch_targets, dim=1).to(device)
@@ -165,6 +177,10 @@ def train(config):
             optimizer.zero_grad()
             loss = criterion.forward(outt, device_targets)
             losses.append(loss.item())
+            nll_loss = nll_criterion.forward(outt, device_targets)
+            #nll_sum = nll_loss.sum()
+            nll += nll_loss.item()
+            nll_losses.append(nll_loss.item())
             accuracy = (outt.argmax(dim=1) == device_targets).float().mean()
             accuracies.append(accuracy)
 
@@ -197,12 +213,21 @@ def train(config):
                         print("epoch: {} ; Accuracy: {} loss: {} ; temp: {} ; text: {}\n".format(epochs, accuracy, loss.item(), temp,  text))
                         fp.write("epoch: {} ; Accuracy: {} loss: {} ; temp: {} ; text: {}\n".format(epochs, accuracy, loss.item(), temp,  text))
 
+        total_length = sum([len(sent) + 1 for sent in dataset.sentences])
+        ppl = np.exp(nll / total_length) 
+        
+        print('Train perplexity: {}'.format(ppl))
+        
     plt.plot(accuracies)
     plt.ylabel('accuracies')
     plt.show()
 
     plt.plot(losses)
     plt.ylabel('losses')
+    plt.show()
+
+    plt.plot(nll_losses)
+    plt.ylabel('nll_losses')
     plt.show()
     print('Done training.')
 
